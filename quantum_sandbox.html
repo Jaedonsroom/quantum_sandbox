@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Quantum Sandbox — Shop + Particles</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, Arial, sans-serif; display: flex; height: 100vh; background: #0b0f14; color: #e6f1ff; }
+    #sidebar { width: 260px; background: #141b25; border-right: 1px solid #1f2b3a; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+    h2 { margin: 0 0 4px; font-size: 18px; }
+    h3 { margin: 10px 0 6px; font-size: 14px; color: #9fb0c7; }
+    .btn { padding: 10px; border-radius: 10px; background: #1a2431; border: 1px solid #233347; cursor: pointer; text-align: center; user-select: none; }
+    .btn:hover { background: #202c3b; }
+    .locked { opacity: .55; }
+    .selected { outline: 2px solid #ffd166; }
+    #currency { font-weight: 700; background: #102233; padding: 8px 10px; border-radius: 8px; border: 1px solid #233347; }
+    #hint { font-size: 12px; color: #9fb0c7; }
+    #canvas { flex: 1; display: block; background: radial-gradient(1400px 700px at 60% -10%, #0e1a28, #0b0f14); }
+    #hud { position: fixed; right: 14px; bottom: 14px; width: 380px; background: #101824cc; border: 1px solid #233347; border-radius: 12px; padding: 10px; }
+    #hud .row { display:flex; gap:10px; align-items:center; }
+    #hud label { font-size: 12px; color: #9fb0c7; }
+    #legend { font-size: 12px; color: #9fb0c7; display: grid; grid-template-columns: 1fr 1fr; gap:6px 12px; margin-top: 6px; }
+    .dot { width: 10px; height:10px; border-radius: 50%; display:inline-block; margin-right: 6px; vertical-align: -1px; }
+    .pill { padding: 6px 8px; border:1px solid #233347; background:#1a2431; border-radius:999px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>Quantum Sandbox</h2>
+    <div id="currency">QuantaCoins: 0</div>
+    <div id="hint">Select a tool, then click on the canvas to place it. Emitters auto-fire particles → watch the screen at the right!</div>
+
+    <h3>Free Tools</h3>
+    <div class="btn" id="emitterBtn">Emitter</div>
+    <div class="btn" id="slitBtn">Double Slit</div>
+    <div class="btn" id="detectorBtn">Detector</div>
+
+    <h3>Shop Items</h3>
+    <div class="btn locked" id="entanglerBtn">Quantum Entangler (50 QC)</div>
+    <div class="btn locked" id="exoticBtn">Exotic Detector (75 QC)</div>
+    <div class="btn locked" id="timeCrystalBtn">Time Crystal (100 QC)</div>
+    <!-- BLACK HOLE SHOP ENTRY -->
+    <div class="btn locked" id="blackHoleBtn">Black Hole (500 QC)</div>
+
+    <h3>Controls</h3>
+    <div class="btn" id="resetBtn">Reset World</div>
+    <div class="btn" id="pauseBtn">Pause</div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <div id="hud">
+    <div class="row">
+      <label>Beam Rate</label>
+      <input id="rate" type="range" min="1" max="200" value="80" />
+      <span id="rateVal">80</span>
+      <span class="pill" id="toggleObs">Observation: OFF</span>
+    </div>
+    <div id="legend">
+      <div><span class="dot" style="background:#62f0a0"></span> Unmeasured particles</div>
+      <div><span class="dot" style="background:#5ee3ff"></span> Measured particles</div>
+      <div><span class="dot" style="background:#b388ff"></span> Entangler zone</div>
+      <div><span class="dot" style="background:#ffd166"></span> Time Crystal field</div>
+    </div>
+  </div>
+
+  <script>
+  // ----------------- Canvas + World -----------------
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  let W = canvas.width = window.innerWidth - 260; // minus sidebar
+  let H = canvas.height = window.innerHeight;
+  window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth - 260;
+    H = canvas.height = window.innerHeight;
+    screenGeom.x = W - 26;
+  });
+
+  // Screen (detector wall) at right
+  const screenGeom = { x: W - 26, w: 20, bins: 220, hist: new Float32Array(220) };
+
+  // Economy / shop
+  let coins = 0;
+  let unlocked = { }; // entangler/exoticDetector/timeCrystal/blackHole after purchase
+  let currentTool = null;
+  let paused = false;
+  let observe = false; // if true, detectors collapse paths (kills interference)
+  const coinDrops = [];
+
+  // UI helpers
+  const $ = (id) => document.getElementById(id);
+  function setSelected(buttonId) {
+    document.querySelectorAll('#sidebar .btn').forEach(b => b.classList.remove('selected'));
+    const btn = $(buttonId);
+    if (btn) btn.classList.add('selected');
+  }
+  function updateCurrency() {
+    $('currency').textContent = 'QuantaCoins: ' + coins;
+    if (unlocked.entangler) $('entanglerBtn').classList.remove('locked');
+    if (unlocked.exoticDetector) $('exoticBtn').classList.remove('locked');
+    if (unlocked.timeCrystal) $('timeCrystalBtn').classList.remove('locked');
+    if (unlocked.blackHole) $('blackHoleBtn').classList.remove('locked');
+  }
+
+  // Buttons
+  $('emitterBtn').onclick = () => { currentTool = 'emitter'; setSelected('emitterBtn'); };
+  $('slitBtn').onclick = () => { currentTool = 'slit'; setSelected('slitBtn'); };
+  $('detectorBtn').onclick = () => { currentTool = 'detector'; setSelected('detectorBtn'); };
+
+  $('entanglerBtn').onclick = () => tryBuyOrSelect('entangler', 50, 'entanglerBtn');
+  $('exoticBtn').onclick    = () => tryBuyOrSelect('exoticDetector', 75, 'exoticBtn');
+  $('timeCrystalBtn').onclick = () => tryBuyOrSelect('timeCrystal', 100, 'timeCrystalBtn');
+  // black hole shop button
+  $('blackHoleBtn').onclick = () => tryBuyOrSelect('blackHole', 500, 'blackHoleBtn');
+
+  $('resetBtn').onclick = () => resetWorld();
+  $('pauseBtn').onclick = () => { paused = !paused; $('pauseBtn').textContent = paused ? 'Resume' : 'Pause'; };
+  $('toggleObs').onclick = () => { observe = !observe; $('toggleObs').textContent = 'Observation: ' + (observe ? 'ON' : 'OFF'); };
+
+  $('rate').oninput = (e) => { emitRate = +e.target.value; $('rateVal').textContent = emitRate; };
+
+  function tryBuyOrSelect(type, cost, btnId) {
+    if (!unlocked[type]) {
+      if (coins >= cost) {
+        coins -= cost;
+        unlocked[type] = true;
+        updateCurrency();
+        alert(type + ' unlocked!');
+        currentTool = type;
+        setSelected(btnId);
+      } else {
+        alert('Not enough QuantaCoins!');
+      }
+    } else {
+      currentTool = type;
+      setSelected(btnId);
+    }
+  }
+
+  // ----------------- Objects & Particles -----------------
+  const objects = []; // {type, x,y,w,h, gap, slitW, note...}
+  const particles = []; // live particles
+
+  // Place objects on click (or collect coin if clicked)
+  canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // pick up coins if clicked
+    for (let i = coinDrops.length - 1; i >= 0; i--) {
+      const c = coinDrops[i];
+      if (Math.hypot(x - c.x, y - c.y) < 12) {
+        coins += c.value;
+        coinDrops.splice(i, 1);
+        updateCurrency();
+        return;
+      }
+    }
+
+    if (!currentTool) return;
+
+    // Prevent selecting locked tools
+    if (['entangler','exoticDetector','timeCrystal','blackHole'].includes(currentTool) && !unlocked[currentTool]) return;
+
+    // Place the object
+    switch (currentTool) {
+      case 'emitter':
+        objects.push({ type: 'emitter', x, y, dir: {x: 1, y: 0} });
+        break;
+      case 'slit': {
+        // Double slit barrier
+        const w = 14, h = 200;
+        const gap = 70, slitW = 14;
+        objects.push({ type: 'slit', x: x - w/2, y: y - h/2, w, h, gap, slitW });
+        break;
+      }
+      case 'detector': {
+        objects.push({ type: 'detector', x: x - 25, y: y - 40, w: 50, h: 80 });
+        break;
+      }
+      case 'entangler': {
+        objects.push({ type: 'entangler', x: x - 30, y: y - 30, w: 60, h: 60 });
+        break;
+      }
+      case 'exoticDetector': {
+        objects.push({ type: 'exoticDetector', x: x - 28, y: y - 28, w: 56, h: 56 });
+        break;
+      }
+      case 'timeCrystal': {
+        objects.push({ type: 'timeCrystal', x: x - 32, y: y - 32, w: 64, h: 64 });
+        break;
+      }
+      case 'blackHole': {
+        // place a moving black hole; initial radius r, strength of pull, and a small random velocity
+        objects.push({
+          type: 'blackHole',
+          x,
+          y,
+          r: 48,            // visible radius
+          strength: 1800,   // gravitational factor (tweakable)
+          vx: (Math.random() - 0.5) * 40, // pixels/sec
+          vy: (Math.random() - 0.5) * 40,
+          _angle: Math.random() * Math.PI * 2
+        });
+        break;
+      }
+    }
+
+    // Reward for building
+    coins += 5;
+    updateCurrency();
+  });
+
+  // Emitters produce particles
+  let emitAccumulator = 0;
+  let emitRate = 80; // particles per second (UI slider)
+  const SPEED = 140;
+
+  function emitFromEmitters(dt) {
+    emitAccumulator += dt * emitRate;
+    while (emitAccumulator >= 1) {
+      emitAccumulator -= 1;
+      for (const o of objects) {
+        if (o.type !== 'emitter') continue;
+        // small angular spread
+        const ang = Math.atan2(o.dir.y, o.dir.x) + (Math.random() - 0.5) * 0.25;
+        const vx = Math.cos(ang), vy = Math.sin(ang);
+        const phase = Math.random() * Math.PI * 2;
+        particles.push({
+          x: o.x, y: o.y, vx, vy,
+          measured: false, color: '#62f0a0',
+          passedSlit: false,
+          passedWhich: null, // 'top'/'bot'/null
+          phase,
+          life: 8 // seconds cap
+        });
+      }
+    }
+  }
+
+  // ----------------- Helpers -----------------
+  function inRect(x,y, it) { return x > it.x && y > it.y && x < it.x + it.w && y < it.y + it.h; }
+
+  // ----------------- Simulation -----------------
+  function step(dt) {
+    if (paused) return;
+
+    // spawns
+    emitFromEmitters(dt);
+
+    // random coin spawns
+    if (Math.random() < dt * 0.35) {
+      coinDrops.push({
+        x: Math.random() * (screenGeom.x - 30),
+        y: Math.random() * H,
+        value: Math.random() < 0.75 ? 10 : 20
+      });
+    }
+
+    // --- Black Hole movement update (before processing particles) ---
+    for (const it of objects) {
+      if (it.type === 'blackHole') {
+        // move according to velocity; dt is seconds
+        it.x += (it.vx || 0) * dt;
+        it.y += (it.vy || 0) * dt;
+        it._angle = (it._angle || 0) + dt * 0.6;
+
+        // keep inside the main play area (do not cross into detector screen)
+        const margin = 16;
+        const leftLimit = margin;
+        const rightLimit = Math.max(margin, screenGeom.x - 40);
+        if (it.x < leftLimit) { it.x = leftLimit; it.vx = Math.abs(it.vx); }
+        if (it.x > rightLimit) { it.x = rightLimit; it.vx = -Math.abs(it.vx); }
+        if (it.y < margin) { it.y = margin; it.vy = Math.abs(it.vy); }
+        if (it.y > H - margin) { it.y = H - margin; it.vy = -Math.abs(it.vy); }
+      }
+    }
+
+    // move particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.life -= dt;
+      if (p.life <= 0) { particles.splice(i,1); continue; }
+
+      // slight diffusion jitter
+      const j = 0.2;
+      p.vx += (Math.random() - 0.5) * j * dt;
+      p.vy += (Math.random() - 0.5) * j * dt;
+      const vn = Math.hypot(p.vx, p.vy); p.vx /= vn; p.vy /= vn;
+
+      // advance
+      p.x += p.vx * SPEED * dt;
+      p.y += p.vy * SPEED * dt;
+
+      // bounce top/bottom
+      if (p.y < 8) { p.y = 8; p.vy = Math.abs(p.vy); }
+      if (p.y > H - 8) { p.y = H - 8; p.vy = -Math.abs(p.vy); }
+      if (p.x < 8) { p.x = 8; p.vx = Math.abs(p.vx); }
+
+      // interactions with items
+      for (const it of objects) {
+        if (it.type === 'slit') {
+          // If inside barrier x-range
+          if (p.x > it.x && p.x < it.x + it.w && p.y > it.y && p.y < it.y + it.h) {
+            // compute slit windows
+            const mid = it.y + it.h / 2;
+            const topY = mid - it.gap / 2 - it.slitW / 2;
+            const botY = mid + it.gap / 2 - it.slitW / 2;
+            const inTop = p.y > topY && p.y < topY + it.slitW;
+            const inBot = p.y > botY && p.y < botY + it.slitW;
+            if (inTop) {
+              // mark passed via top slit
+              p.passedSlit = true; p.passedWhich = 'top';
+            } else if (inBot) {
+              p.passedSlit = true; p.passedWhich = 'bot';
+            } else {
+              // bounce off the barrier
+              p.vx = -Math.abs(p.vx);
+              p.x = it.x - 1;
+            }
+          }
+        }
+
+        if (it.type === 'detector') {
+          if (inRect(p.x, p.y, it) && observe && !p.measured) {
+            p.measured = true;
+            p.color = '#5ee3ff';
+          }
+        }
+
+        if (it.type === 'exoticDetector') {
+          if (inRect(p.x, p.y, it) && !p._exoticProcessed) {
+            p._exoticProcessed = true; //avoid multiple triggers per detector
+
+            const r = Math.random();
+            if (r<0.3) {
+              //collapse like a normal detector
+              p.measured = true; p.color = '#5ee3ff';
+            } else if (r<0.6) {
+              //spawn coins
+              coinDrops.push({ x: p.x, y: p.y, value: 10 });
+            }
+            else if (r<0.8) {
+              //Amplify particle
+               p.vx *= 1.5;
+               p.vy *= 1.5;
+               p.color = '#00ffaa'; // glowing teal
+            }
+            else {
+              //duplicate particle
+              const clone = { ...p }; // shallow copy
+              clone.x += (Math.random() - 0.5) * 8;
+              clone.y += (Math.random() - 0.5) * 8;
+              clone.vx += (Math.random() - 0.5) * 0.2;
+              clone.vy += (Math.random() - 0.5) * 0.2;
+              clone.life = p.life; // same lifetime
+              particles.push(clone);
+              p.color = '#ff77ff'; // mark original as "split"
+            }
+          }
+        }
+        
+  // global counter for entangled pairs
+  let entangleCounter = 1;
+
+
+  if (it.type === 'entangler') {
+    if (inRect(p.x, p.y, it)) {
+     // If this particle isn’t entangled, try to find a partner
+    if (!p.entangledId) {
+      const partner = particles.find(
+        q => q !== p && !q.entangledId && inRect(q.x, q.y, it)
+      );
+      if (partner) {
+        const eid = entangleCounter++;
+        p.entangledId = eid;
+        partner.entangledId = eid;
+        p.color = partner.color = '#b388ff'; // purple glow
+      }
+    }
+
+    // Wobble their phase while inside the field
+    p.phase += dt * 6;
+    if (Math.random() < dt * 0.2) { coins += 1; updateCurrency(); }
+  }
+}
+
+        if (it.type === 'timeCrystal') {
+          if (inRect(p.x, p.y, it)) {
+            // gently rotate velocity like a field
+            const rot = Math.sin((p.x + p.y) * 0.02 + performance.now() * 0.004) * 3 * dt;
+            const nx = p.vx * Math.cos(rot) - p.vy * Math.sin(rot);
+            const ny = p.vx * Math.sin(rot) + p.vy * Math.cos(rot);
+            p.vx = nx; p.vy = ny;
+          }
+        }
+
+        // ----- BLACK HOLE INTERACTION -----
+        if (it.type === 'blackHole') {
+          // gravitational pull: apply force toward it
+          const dx = it.x - p.x;
+          const dy = it.y - p.y;
+          const dist2 = dx*dx + dy*dy;
+          // skip if too far
+          const maxRange = Math.max(1, it.r * 6);
+          if (dist2 < maxRange * maxRange) {
+            const dist = Math.sqrt(dist2) + 0.0001;
+            // accel magnitude (tweakable). clamp to avoid huge values.
+            const accel = Math.min((it.strength || 1800) / Math.max(1, dist2), 6000);
+            // apply to the particle's normalized velocity (scale for SPEED)
+            p.vx += (dx / dist) * (accel * dt) / SPEED;
+            p.vy += (dy / dist) * (accel * dt) / SPEED;
+
+            // If particle falls inside the event horizon, consume it
+            if (dist < Math.max(4, it.r * 0.38)) {
+              // remove particle
+              particles.splice(i, 1);
+              // grow black hole slowly
+              it.r = Math.min(it.r + 0.6, 1400);
+              // strengthen pull moderately
+              it.strength = (it.strength || 1800) + 30;
+              // reward some coins occasionally
+              if (Math.random() < 0.25) { coins += 2; updateCurrency(); }
+              // continue outer loop (we already removed particle)
+              break;
+            }
+          }
+        }
+
+      }
+
+      // hit screen -> update histogram and remove particle
+      if (p.x > screenGeom.x) {
+        const bins = screenGeom.bins;
+        const bin = Math.max(0, Math.min(bins - 1, Math.floor((p.y / H) * bins)));
+
+        // Interference heuristic:
+        // - If passed slits and NOT measured: bright/dark fringes along y
+        // - If measured or no slit: soft Gaussian band
+        let add = 0.02;
+        if (p.passedSlit && !p.measured) {
+          const k = 0.10; // fringe spacing factor
+          const bias = (p.passedWhich === 'top' ? 0 : Math.PI); // relative phase offset
+          add += 0.6 * (1 + Math.cos(k * p.y + p.phase + bias)) * 0.5;
+        } else {
+          // simple blur around current bin
+          for (let d = -2; d <= 2; d++) {
+            const b = bin + d;
+            if (b >= 0 && b < bins) screenGeom.hist[b] += [0.12, 0.18, 0.22, 0.18, 0.12][d + 2];
+          }
+        }
+        screenGeom.hist[bin] += add;
+
+        // occasional coin reward for reaching screen
+        if (Math.random() < 0.03) { coins += 1; updateCurrency(); }
+
+        particles.splice(i, 1);
+      }
+    }
+  }
+
+  // ----------------- Render -----------------
+  function draw() {
+    // background
+    const grd = ctx.createLinearGradient(0,0,0,H);
+    grd.addColorStop(0,'#0c1622'); grd.addColorStop(1,'#0b0f14');
+    ctx.fillStyle = grd; ctx.fillRect(0,0,W,H);
+
+    // screen
+    ctx.save();
+    ctx.translate(screenGeom.x, 0);
+    ctx.fillStyle = 'rgba(190,210,255,.06)';
+    ctx.strokeStyle = 'rgba(190,210,255,.25)';
+    ctx.setLineDash([6,6]); ctx.lineWidth = 1;
+    ctx.fillRect(0,0,screenGeom.w,H);
+    ctx.strokeRect(0,0,screenGeom.w,H);
+    ctx.setLineDash([]);
+
+    // histogram
+    const max = 1 + Math.max(...screenGeom.hist);
+    ctx.fillStyle = 'rgba(190,210,255,.35)';
+    for (let i=0;i<screenGeom.bins;i++) {
+      const h = (screenGeom.hist[i]/max) * (H-20);
+      ctx.fillRect(2, H-h-2, screenGeom.w-4, h);
+    }
+    ctx.restore();
+
+    // objects
+    for (const it of objects) {
+      if (it.type === 'emitter') {
+        ctx.fillStyle = '#80e7ff'; ctx.strokeStyle = '#23465c';
+        ctx.beginPath(); ctx.arc(it.x, it.y, 10, 0, Math.PI*2); ctx.fill();
+        ctx.strokeText('E', it.x-4, it.y+4);
+      }
+      if (it.type === 'slit') {
+        ctx.fillStyle = '#1b2a3b'; ctx.strokeStyle = '#2f4b68'; ctx.lineWidth = 1.5;
+        ctx.fillRect(it.x, it.y, it.w, it.h); ctx.strokeRect(it.x, it.y, it.w, it.h);
+        const mid = it.y + it.h/2;
+        const topY = mid - it.gap/2 - it.slitW/2;
+        const botY = mid + it.gap/2 - it.slitW/2;
+        ctx.clearRect(it.x-1, topY, it.w+2, it.slitW);
+        ctx.clearRect(it.x-1, botY, it.w+2, it.slitW);
+      }
+      if (it.type === 'detector') {
+        ctx.fillStyle = 'rgba(120,200,255,.08)'; ctx.strokeStyle = '#78c8ff'; ctx.setLineDash([4,2]);
+        ctx.fillRect(it.x, it.y, it.w, it.h); ctx.strokeRect(it.x, it.y, it.w, it.h); ctx.setLineDash([]);
+      }
+      if (it.type === 'exoticDetector') {
+        ctx.fillStyle = 'rgba(255,165,0,.10)'; ctx.strokeStyle = '#ffb347';
+        ctx.fillRect(it.x, it.y, it.w, it.h); ctx.strokeRect(it.x, it.y, it.w, it.h);
+      }
+      if (it.type === 'entangler') {
+        ctx.fillStyle = 'rgba(179,136,255,.12)'; ctx.strokeStyle = '#b388ff';
+        ctx.fillRect(it.x, it.y, it.w, it.h); ctx.strokeRect(it.x, it.y, it.w, it.h);
+      }
+      if (it.type === 'timeCrystal') {
+        ctx.fillStyle = 'rgba(255,209,102,.12)'; ctx.strokeStyle = '#ffd166';
+        ctx.fillRect(it.x, it.y, it.w, it.h); ctx.strokeRect(it.x, it.y, it.w, it.h);
+      }
+
+      // BLACK HOLE VISUAL
+      if (it.type === 'blackHole') {
+        // glow + event horizon + inner rim
+        ctx.save();
+        // outer glow
+        const glowRadius = Math.max(it.r * 0.8, 40);
+        const g = ctx.createRadialGradient(it.x, it.y, Math.max(1, it.r * 0.25), it.x, it.y, it.r + glowRadius);
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(0.6, 'rgba(60,0,80,0.14)');
+        g.addColorStop(1, 'rgba(25,0,40,0.35)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(it.x, it.y, it.r + glowRadius, 0, Math.PI*2);
+        ctx.fill();
+
+        // main black disk
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(0,0,0,1)';
+        ctx.arc(it.x, it.y, it.r, 0, Math.PI*2);
+        ctx.fill();
+
+        // event-horizon rim (pulsing)
+        const rimAlpha = 0.12 + 0.08 * Math.abs(Math.sin(it._angle || 0));
+        ctx.lineWidth = Math.max(2, Math.min(12, it.r * 0.06));
+        ctx.strokeStyle = `rgba(187,119,255,${rimAlpha})`;
+        ctx.beginPath();
+        ctx.arc(it.x, it.y, Math.max(2, it.r * 0.42), 0, Math.PI*2);
+        ctx.stroke();
+
+        // inner swirl (simple rotated lines)
+        ctx.translate(it.x, it.y);
+        ctx.rotate((it._angle || 0) * 0.7);
+        ctx.strokeStyle = 'rgba(120,60,180,0.25)';
+        ctx.lineWidth = Math.max(1, it.r * 0.01);
+        for (let a=0; a<6; a++) {
+          ctx.beginPath();
+          const ang = a * Math.PI/3;
+          ctx.arc(0, 0, Math.max(4, it.r * (0.15 + 0.06 * a)), ang, ang + 0.5);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    // particles
+    for (const p of particles) {
+      ctx.globalAlpha = p.measured ? 0.95 : 0.55 + 0.35*Math.cos(p.phase);
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.measured ? 2.5 : 2.0, 0, Math.PI*2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // coins
+    for (const c of coinDrops) {
+      ctx.fillStyle = 'gold';
+      ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#111'; ctx.font = '12px system-ui';
+      ctx.fillText(c.value, c.x - 6, c.y + 4);
+    }
+  }
+
+  // ----------------- World mgmt -----------------
+  function resetWorld() {
+    particles.length = 0;
+    objects.length = 0;
+    screenGeom.hist.fill(0);
+    coins = 0; updateCurrency();
+    currentTool = null; setSelected('');
+  }
+
+  // ----------------- Main loop -----------------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    step(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  updateCurrency();
+  requestAnimationFrame(frame);
+  </script>
+  <!-- EXTRA QUANTUM TOOLS -->
+<script>
+// ===================== EXTRA QUANTUM TOOLS =====================
+
+// make sure new shop items unlock correctly
+function updateExtraCurrency() {
+  if (unlocked.superposition) document.getElementById('superpositionBtn').classList.remove('locked');
+  if (unlocked.tunnel)        document.getElementById('tunnelBtn').classList.remove('locked');
+  if (unlocked.decoherence)   document.getElementById('decoherenceBtn').classList.remove('locked');
+  if (unlocked.teleporter)    document.getElementById('teleporterBtn').classList.remove('locked');
+}
+const oldUpdateCurrency = updateCurrency;
+updateCurrency = function() { oldUpdateCurrency(); updateExtraCurrency(); };
+
+// add new buttons into sidebar
+const shopHeader = document.querySelector('#sidebar h3:nth-of-type(2)'); // "Shop Items"
+shopHeader.insertAdjacentHTML("afterend", `
+  <div class="btn locked" id="superpositionBtn">Superposition Field (120 QC)</div>
+  <div class="btn locked" id="tunnelBtn">Tunneling Barrier (150 QC)</div>
+  <div class="btn locked" id="decoherenceBtn">Decoherence Field (200 QC)</div>
+  <div class="btn locked" id="teleporterBtn">Quantum Teleporter (300 QC)</div>
+`);
+
+// hook up button logic
+document.getElementById('superpositionBtn').onclick = () => tryBuyOrSelect('superposition', 120, 'superpositionBtn');
+document.getElementById('tunnelBtn').onclick        = () => tryBuyOrSelect('tunnel', 150, 'tunnelBtn');
+document.getElementById('decoherenceBtn').onclick   = () => tryBuyOrSelect('decoherence', 200, 'decoherenceBtn');
+document.getElementById('teleporterBtn').onclick    = () => tryBuyOrSelect('teleporter', 300, 'teleporterBtn');
+
+// patch canvas click handler for new objects
+canvas.addEventListener('click', (e) => {
+  if (!currentTool) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  switch(currentTool) {
+    case 'superposition':
+      objects.push({ type:'superposition', x:x, y:y, r:40 });
+      coins += 5; updateCurrency(); break;
+    case 'tunnel':
+      objects.push({ type:'tunnel', x:x-40, y:y-10, w:80, h:20 });
+      coins += 5; updateCurrency(); break;
+    case 'decoherence':
+      objects.push({ type:'decoherence', x:x, y:y, r:60 });
+      coins += 5; updateCurrency(); break;
+    case 'teleporter':
+      const id = Math.floor(Math.random()*1000);
+      objects.push({ type:'teleporter', x:x, y:y, r:30, id });
+      coins += 5; updateCurrency(); break;
+  }
+});
+
+// extend step
+const oldStep = step;
+step = function(dt) {
+  oldStep(dt);
+
+  for (const p of particles) {
+    for (const it of objects) {
+      if (it.type === 'superposition') {
+        const dx = p.x-it.x, dy=p.y-it.y;
+        if (dx*dx+dy*dy < it.r*it.r && !p.measured) {
+          //controlled branching: rotate velocity slightly left/right
+          if (Math.random()<0.05) {
+            const angle = (Math.random()<0.5?-1:1) *0.35;
+            const nx = p.vx * Math.cos(angle) - p.vy * Math.sin(angle);
+            const ny = p.vx * Math.sin(angle) + p.vy * Math.cos(angle);
+            p.vx = nx; p.vy = ny;
+            p.color = '#00ffff'; // cyan glow
+          }
+        }
+      }
+      if (it.type === 'tunnel') {
+        if (p.x>it.x && p.x<it.x+it.w && p.y>it.y && p.y<it.y+it.h) {
+          if (Math.random()<0.2) {
+            // tunnel through
+          } else {
+            p.vx*=-1; p.vy*=-1;
+          }
+        }
+      }
+      if (it.type === 'decoherence') {
+        const dx=p.x-it.x, dy=p.y-it.y;
+        if (dx*dx+dy*dy < it.r*it.r) {
+          p.measured=true; p.color='#ffaa55';
+        }
+      }
+      if (it.type === 'teleporter') {
+        const dx=p.x-it.x, dy=p.y-it.y;
+        if (dx*dx+dy*dy < it.r*it.r) {
+          const partner=objects.find(o=>o.type==='teleporter'&&o.id===it.id&&o!==it);
+          if (partner) { p.x=partner.x; p.y=partner.y; }
+        }
+      }
+    }
+  }
+};
+
+// patch draw
+const oldDraw = draw;
+draw = function() {
+  oldDraw();
+  for (const it of objects) {
+    if (it.type==='superposition') {
+      ctx.beginPath(); ctx.arc(it.x,it.y,it.r,0,Math.PI*2);
+      ctx.strokeStyle='cyan'; ctx.stroke();
+      ctx.fillText('Ψ', it.x-4,it.y+4);
+    }
+    if (it.type==='tunnel') {
+      ctx.fillStyle='rgba(200,50,50,0.2)';
+      ctx.fillRect(it.x,it.y,it.w,it.h);
+      ctx.strokeStyle='red'; ctx.strokeRect(it.x,it.y,it.w,it.h);
+    }
+    if (it.type==='decoherence') {
+      ctx.beginPath(); ctx.arc(it.x,it.y,it.r,0,Math.PI*2);
+      ctx.strokeStyle='orange'; ctx.setLineDash([5,3]);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (it.type==='teleporter') {
+  ctx.beginPath();
+  ctx.arc(it.x,it.y,it.r,0,Math.PI*2);
+  ctx.strokeStyle='magenta';
+  ctx.shadowColor='magenta';
+  ctx.shadowBlur=20;   // glow
+  ctx.lineWidth=2;     
+  ctx.stroke();
+  ctx.shadowBlur=0;    // reset shadow
+  ctx.fillText('⟲', it.x-5,it.y+5);
+}
+
+  }
+};
+</script>
+<script>
+// ===================== MECHANICAL TOOLS =====================
+
+// ---- Add Mechanics Section ----
+const controlsHeader = document.querySelector('#sidebar h3:nth-of-type(3)'); // "Controls"
+controlsHeader.insertAdjacentHTML("beforebegin", `
+  <h3>Mechanics</h3>
+  <div class="btn" id="blockBtn">Block</div>
+  <div class="btn" id="wheelBtn">Wheel</div>
+  <div class="btn" id="mirrorBtn">Mirror</div>
+  <div class="btn" id="fanBtn">Fan</div>
+`);
+
+$('blockBtn').onclick  = () => { currentTool = 'block';  setSelected('blockBtn'); };
+$('wheelBtn').onclick  = () => { currentTool = 'wheel';  setSelected('wheelBtn'); };
+$('mirrorBtn').onclick = () => { currentTool = 'mirror'; setSelected('mirrorBtn'); };
+$('fanBtn').onclick    = () => { currentTool = 'fan';    setSelected('fanBtn'); };
+
+// ---- Placement Logic ----
+canvas.addEventListener('click', (e) => {
+  if (!currentTool) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+  switch (currentTool) {
+    case 'block':
+      objects.push({ type:'block', x:x-25, y:y-25, w:50, h:50 });
+      coins += 2; updateCurrency(); break;
+    case 'wheel':
+      objects.push({ type:'wheel', x, y, r:30, angle:0, spin:0 });
+      coins += 3; updateCurrency(); break;
+    case 'mirror':
+      objects.push({ type:'mirror', x:x-40, y:y-5, w:80, h:10, angle:Math.PI/4 });
+      coins += 2; updateCurrency(); break;
+    case 'fan':
+      objects.push({ type:'fan', x:x-25, y:y-25, w:50, h:50, dir:{x:1,y:0} });
+      coins += 3; updateCurrency(); break;
+  }
+});
+
+// ---- Step Logic Extension ----
+const oldStep_mech = step;
+step = function(dt) {
+  oldStep_mech(dt);
+
+  for (const p of particles) {
+    for (const it of objects) {
+      if (it.type === 'block') {
+        if (p.x > it.x && p.x < it.x+it.w && p.y > it.y && p.y < it.y+it.h) {
+          // bounce back
+          p.vx *= -1; p.vy *= -1;
+          p.x += p.vx*5; p.y += p.vy*5;
+        }
+      }
+
+      if (it.type === 'wheel') {
+        const dx = p.x - it.x, dy = p.y - it.y;
+        const dist2 = dx*dx + dy*dy;
+        if (dist2 < it.r*it.r) {
+          const dist = Math.sqrt(dist2);
+          const nx = dx/dist, ny = dy/dist;
+          const dot = p.vx*nx + p.vy*ny;
+          p.vx -= 2*dot*nx; p.vy -= 2*dot*ny;
+          it.spin += 2; // impart spin
+        }
+        it.angle += it.spin * dt;
+        it.spin *= 0.98;
+      }
+
+      if (it.type === 'mirror') {
+        if (p.x > it.x && p.x < it.x+it.w && p.y > it.y && p.y < it.y+it.h) {
+          const angle = it.angle;
+          const vx = p.vx, vy = p.vy;
+          const nx = Math.cos(angle), ny = Math.sin(angle);
+          const dot = vx*nx + vy*ny;
+          p.vx = vx - 2*dot*nx;
+          p.vy = vy - 2*dot*ny;
+        }
+      }
+
+      if (it.type === 'fan') {
+        if (p.x > it.x && p.x < it.x+it.w && p.y > it.y && p.y < it.y+it.h) {
+          p.vx += it.dir.x * dt * 2;
+          p.vy += it.dir.y * dt * 2;
+        }
+      }
+    }
+  }
+};
+
+// ---- Draw Logic Extension ----
+const oldDraw_mech = draw;
+draw = function() {
+  oldDraw_mech();
+
+  for (const it of objects) {
+    if (it.type === 'block') {
+      ctx.fillStyle = '#555'; ctx.fillRect(it.x,it.y,it.w,it.h);
+      ctx.strokeStyle = '#aaa'; ctx.strokeRect(it.x,it.y,it.w,it.h);
+    }
+
+    if (it.type === 'wheel') {
+      ctx.save();
+      ctx.translate(it.x,it.y);
+      ctx.rotate(it.angle);
+      ctx.strokeStyle = '#0ff'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(0,0,it.r,0,Math.PI*2); ctx.stroke();
+      ctx.moveTo(0,0); ctx.lineTo(it.r,0); ctx.stroke();
+      ctx.restore();
+    }
+
+    if (it.type === 'mirror') {
+      ctx.save();
+      ctx.translate(it.x,it.y);
+      ctx.rotate(it.angle);
+      ctx.fillStyle = '#88f';
+      ctx.fillRect(0,0,it.w,it.h);
+      ctx.restore();
+    }
+
+    if (it.type === 'fan') {
+      ctx.fillStyle = 'rgba(0,200,255,0.2)';
+      ctx.fillRect(it.x,it.y,it.w,it.h);
+      ctx.strokeStyle = '#0cf'; ctx.strokeRect(it.x,it.y,it.w,it.h);
+      ctx.fillText('🌀', it.x+10,it.y+25);
+    }
+  }
+};
+</script>
+</body>
+</html>
+
